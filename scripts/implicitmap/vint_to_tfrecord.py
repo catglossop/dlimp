@@ -27,6 +27,7 @@ import yaml
 from datetime import datetime
 from functools import partial
 from multiprocessing import Pool
+import torch
 
 import numpy as np
 import tensorflow as tf
@@ -37,6 +38,7 @@ from tqdm_multiprocess import TqdmMultiProcessPool
 import dlimp as dl
 from dlimp.utils import read_resize_encode_image, tensor_feature
 from vint_train.data.vint_dataset import ViNT_Dataset
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 
 
 FLAGS = flags.FLAGS
@@ -143,26 +145,28 @@ def process_lang(path):
 
 
 # create a tfrecord for a group of trajectories
-def create_tfrecord(paths, output_path, tqdm_func, global_tqdm):
+def create_tfrecord(items, output_path, tqdm_func, global_tqdm):
     writer = tf.io.TFRecordWriter(output_path)
-    for path in paths:
-        try:
-            # Data collected prior to 7-23 has a delay of 1, otherwise a delay of 0
+    print(items)
+    for idx, item in enumerate(iter(items)):
+        try: 
+            (obs_image,
+            goal_image,
+            action_label,
+            dist_label,
+            goal_pos,
+            dataset_index,
+            action_mask,) = item 
+
             out = dict()
 
-            out["obs"] = process_images(path)
-            out["obs"]["state"] = process_state(path)
-            out["actions"] = process_actions(path)
-            out["lang"] = process_lang(path)
-
-            # append a null action to the end
-            out["actions"].append(np.zeros_like(out["actions"][0]))
-
-            assert (
-                len(out["actions"])
-                == len(out["obs"]["state"])
-                == len(out["obs"]["images0"])
-            )
+            out["obs_image"] = obs_image.numpy()
+            out["goal_image"] = goal_image.numpy()
+            out["actions"] = action_label.numpy()
+            out["goal_pos"] = goal_pos.numpy()
+            out["dataset_index"] = dataset_index.numpy()
+            out["action_mask"] = action_mask.numpy()
+            out["lang"] = ""
 
             example = tf.train.Example(
                 features=tf.train.Features(
@@ -178,7 +182,7 @@ def create_tfrecord(paths, output_path, tqdm_func, global_tqdm):
             import traceback
 
             traceback.print_exc()
-            logging.error(f"Error processing {path}")
+            logging.error(f"Error processing {idx}")
             sys.exit(1)
 
         global_tqdm.update(1)
@@ -191,7 +195,7 @@ def get_traj_paths(path, train_proportion):
     train_traj = []
     val_traj = []
 
-    all_traj = glob.glob(os.path.join(path, *))
+    all_traj = glob.glob(path)
     if not all_traj:
         logging.info(f"no trajs found in {search_path}")
 
@@ -216,7 +220,7 @@ def main(_):
     # each path is a directory that contains dated directories
     paths = glob.glob(os.path.join(FLAGS.input_path, *("*" * (FLAGS.depth - 1))))
     # Should only be sacson 
-    breakpoint()
+    print(paths)
 
     ## Load configs
     with open("defaults.yaml", "r") as f:
@@ -240,39 +244,39 @@ def main(_):
         data_config["end_slack"] = 0
     if "waypoint_spacing" not in data_config:
         data_config["waypoint_spacing"] = 1
-   
 
-    # get trajecotry paths in parallel
-    # with Pool(FLAGS.num_workers) as p:
-    #     train_paths, val_paths = zip(
-    #         *p.map(
-    #             partial(get_traj_paths, train_proportion=FLAGS.train_proportion), paths
-    #         )
-    #     )
-    
-    # train_paths = [x for y in train_paths for x in y]
-    # val_paths = [x for y in val_paths for x in y]
-    # random.shuffle(train_paths)
-    # random.shuffle(val_paths)
-
-    with open(os.path.join(data_config["train"], "traj_names.txt"), "r") as f:
-        train_paths = f.read().split("\n")[:-1]
-        train_paths = [os.path.join(paths[0], t_path) for t_path in train_paths]
-
-    with open(os.path.join(data_config["test"], "traj_names.txt"), "r") as f:
-        val_paths = f.read().split("\n")[:-1]
-        val_paths = [os.path.join(paths[0], v_path) for v_path in val_paths]
-
-
-    random.shuffle(train_paths)
-    random.shuffle(val_paths)
-
+    train_dataset = []
+    test_dataset = []
+    dataset_name = paths[0].split("/")[-1]
+    for data_split_type in ["train", "test"]:
+        if data_split_type in data_config:
+            dataset = ViNT_Dataset(
+                data_folder=data_config["data_folder"],
+                data_split_folder=data_config[data_split_type],
+                dataset_name=dataset_name,
+                image_size=config["image_size"],
+                waypoint_spacing=data_config["waypoint_spacing"],
+                min_dist_cat=config["distance"]["min_dist_cat"],
+                max_dist_cat=config["distance"]["max_dist_cat"],
+                min_action_distance=config["action"]["min_dist_cat"],
+                max_action_distance=config["action"]["max_dist_cat"],
+                negative_mining=data_config["negative_mining"],
+                len_traj_pred=config["len_traj_pred"],
+                learn_angle=config["learn_angle"],
+                context_size=config["context_size"],
+                context_type=config["context_type"],
+                end_slack=data_config["end_slack"],
+                goals_per_obs=data_config["goals_per_obs"],
+                normalize=config["normalize"],
+                goal_type=config["goal_type"],
+            )
+            if data_split_type == "train":
+                train_dataset = dataset
+            else:
+                test_dataset = dataset
     # shard paths
-    train_shards = np.array_split(
-        train_paths, np.ceil(len(train_paths) / FLAGS.shard_size)
-    )
-    val_shards = np.array_split(val_paths, np.ceil(len(val_paths) / FLAGS.shard_size))
-
+    train_shards = [Subset(train_dataset, np.arange(int((i-1)*FLAGS.shard_size), int(i*FLAGS.shard_size))) for i in range(int(np.ceil(len(train_dataset) / FLAGS.shard_size)))]
+    val_shards = [Subset(test_dataset, np.arange(int((i-1)*FLAGS.shard_size), int(i*FLAGS.shard_size))) for i in range(int(np.ceil(len(test_dataset) / FLAGS.shard_size)))]
     # create output paths
     tf.io.gfile.makedirs(os.path.join(FLAGS.output_path, "train"))
     tf.io.gfile.makedirs(os.path.join(FLAGS.output_path, "val"))
@@ -297,7 +301,7 @@ def main(_):
     # run tasks
     pool = TqdmMultiProcessPool(FLAGS.num_workers)
     with tqdm.tqdm(
-        total=len(train_paths) + len(val_paths),
+        total=len(train_dataset) + len(test_dataset),
         dynamic_ncols=True,
         position=0,
         desc="Total progress",
