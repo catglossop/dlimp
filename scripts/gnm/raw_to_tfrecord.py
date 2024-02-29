@@ -1,19 +1,19 @@
 """
-Converts data from the BridgeData raw format to TFRecord format.
+Converts data from the GNM raw format to TFRecord format.
 
 Consider the following directory structure for the input data:
 
-    sacson_raw/
-        month-day-year-location-run/
-            0.jpg
-            ...
-            n.jpg
-            traj_data.pkl
-        
+    gnm_raw/
+        sacson/
+            Dec_X_X_X_X/
+                0.jpg
+                traj_data.pkl
 
 The --depth parameter controls how much of the data to process at the
---input_path; for example, if --depth=1, then --input_path should be
-"sacson", and all data will be processed.
+--input_path; for example, if --depth=5, then --input_path should be
+"bridgedata_raw", and all data will be processed. If --depth=3, then
+--input_path should be "bridgedata_raw/rss/toykitchen2", and only data
+under "toykitchen2" will be processed.
 
 Can write directly to Google Cloud Storage, but not read from it.
 """
@@ -52,15 +52,15 @@ flags.DEFINE_float(
 )
 flags.DEFINE_integer("num_workers", 8, "Number of threads to use")
 flags.DEFINE_integer("shard_size", 200, "Maximum number of trajectories per shard")
-flags.DEFINE_string('Text annotations', None, 'text annotations path', required=False)
 
-IMAGE_SIZE = (128, 128)
+IMAGE_SIZE = (256, 256)
+
 
 def process_images(path):  # processes images at a trajectory level
     image_dirs = set(os.listdir(str(path)))
     image_paths = [
         sorted(
-            glob.glob(os.path.join(path, image_dir, "im_*.jpg")),
+            glob.glob(os.path.join(path, image_dir, "*.jpg")),
             key=lambda x: int(x.split("_")[-1].split(".")[0]),
         )
         for image_dir in image_dirs
@@ -74,18 +74,14 @@ def process_images(path):  # processes images at a trajectory level
         for image_dir, p in zip(image_dirs, image_paths)
     }
 
-    for missing in CAMERA_VIEWS - set(d.keys()):
-        d[missing] = [""] * len(
-            image_paths[0]
-        )  # empty string is a placeholder for missing images
-
     return d
 
 
 def process_state(path):
-    fp = os.path.join(path, "obs_dict.pkl")
+    fp = os.path.join(path, "traj_data.pkl")
     with open(fp, "rb") as f:
         x = pickle.load(f)
+        breakpoint()
     return x["full_state"]
 
 
@@ -113,27 +109,19 @@ def create_tfrecord(paths, output_path, tqdm_func, global_tqdm):
     writer = tf.io.TFRecordWriter(output_path)
     for path in paths:
         try:
-            # Data collected prior to 7-23 has a delay of 1, otherwise a delay of 0
-            date_time = datetime.strptime(path.split("/")[-4], "%Y-%m-%d_%H-%M-%S")
-            latency_shift = date_time < datetime(2021, 7, 23)
 
             out = dict()
 
             out["obs"] = process_images(path)
             out["obs"]["state"] = process_state(path)
             out["actions"] = process_actions(path)
-            out["lang"] = process_lang(path)
-
-            # shift the actions according to camera latency
-            if latency_shift:
-                out["obs"] = {k: v[1:] for k, v in out["obs"].items()}
-                out["actions"] = out["actions"][:-1]
+            # out["lang"] = process_lang(path)
 
             # append a null action to the end
             out["actions"].append(np.zeros_like(out["actions"][0]))
 
             assert (
-                len(out["actions"])
+                len(out["actions"])``````````
                 == len(out["obs"]["state"])
                 == len(out["obs"]["images0"])
             )
@@ -164,13 +152,15 @@ def create_tfrecord(paths, output_path, tqdm_func, global_tqdm):
 def get_traj_paths(path, train_proportion):
     train_traj = []
     val_traj = []
+    all_traj = []
     for dated_folder in os.listdir(path):
         # a mystery left by the greats of the past
         if "lmdb" in dated_folder:
             continue
-
-        search_path = os.path.join(path, dated_folder, "raw", "traj_group*", "traj*")
-        all_traj = glob.glob(search_path)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              
+        search_path = os.path.join(path, dated_folder)
+        print(search_path)
+        all_traj.append(glob.glob(search_path))
         if not all_traj:
             logging.info(f"no trajs found in {search_path}")
             continue
@@ -193,20 +183,19 @@ def main(_):
             return
 
     # each path is a directory that contains dated directories
-    paths = glob.glob(os.path.join(FLAGS.input_path, *("*" * (FLAGS.depth - 1))))
-
-    # get trajecotry paths in parallel
-    with Pool(FLAGS.num_workers) as p:
-        train_paths, val_paths = zip(
-            *p.map(
-                partial(get_traj_paths, train_proportion=FLAGS.train_proportion), paths
-            )
-        )
+    paths = glob.glob(FLAGS.input_path)
+    # get trajectory paths in parallel
+    train_paths, val_paths = [], []
+    for path in paths:
+        train_paths_temp, val_paths_temp = get_traj_paths(path, FLAGS.train_proportion)
+        train_paths.append(train_paths_temp)
+        val_paths.append(val_paths_temp)
 
     train_paths = [x for y in train_paths for x in y]
     val_paths = [x for y in val_paths for x in y]
     random.shuffle(train_paths)
     random.shuffle(val_paths)
+    breakpoint()
 
     # shard paths
     train_shards = np.array_split(
