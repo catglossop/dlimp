@@ -28,6 +28,7 @@ from datetime import datetime
 from functools import partial
 from multiprocessing import Pool
 import torch
+from typing import Tuple
 
 import numpy as np
 import tensorflow as tf
@@ -36,7 +37,7 @@ from absl import app, flags
 from tqdm_multiprocess import TqdmMultiProcessPool
 
 import dlimp as dl
-from dlimp.utils import read_resize_encode_image, tensor_feature
+from dlimp.utils import read_resize_encode_image, tensor_feature, resize_image
 from vint_train.data.vint_dataset import ViNT_Dataset
 from torch.utils.data import DataLoader, ConcatDataset, Subset
 
@@ -59,95 +60,20 @@ flags.DEFINE_integer("num_workers", 8, "Number of threads to use")
 flags.DEFINE_integer("shard_size", 200, "Maximum number of trajectories per shard")
 flags.DEFINE_string('text_annots', None, 'text annotations path', required=False)
 flags.DEFINE_string('config', "sacson.yaml", 'config path', required=False)
+flags.DEFINE_integer('traj_len', 20, "num steps per traj", required=False)
 
 IMAGE_SIZE = (128, 128)
 
-def process_images(path):  # processes images at a trajectory level
-    image_dirs = set(os.listdir(str(path)))
-    image_paths = [
-        sorted(
-            glob.glob(os.path.join(path, image_dir, "*.jpg")),
-            key=lambda x: int(x.split("_")[-1].split(".")[0]),
-        )
-        for image_dir in image_dirs
-    ]
-
-    filenames = [[path.split("/")[-1] for path in x] for x in image_paths]
-    assert all(x == filenames[0] for x in filenames)
-
-    d = {
-        image_dir: [read_resize_encode_image(path, IMAGE_SIZE) for path in p]
-        for image_dir, p in zip(image_dirs, image_paths)
-    }
-
-    return d
-
-
-def process_state(path):
-    with open(os.path.join(path, "traj_data.pkl"), "rb") as f:
-        traj_data = pickle.load(f)
-    
-    start_index = curr_time
-    end_index = curr_time + self.len_traj_pred * self.waypoint_spacing + 1
-    return 
-
-def _compute_actions(self, traj_data, curr_time, goal_time):
-    start_index = curr_time
-    end_index = curr_time + self.len_traj_pred * self.waypoint_spacing + 1
-    yaw = traj_data["yaw"][start_index:end_index:self.waypoint_spacing]
-    positions = traj_data["position"][start_index:end_index:self.waypoint_spacing]
-    goal_pos = traj_data["position"][min(goal_time, len(traj_data["position"]) - 1)]
-
-    if len(yaw.shape) == 2:
-        yaw = yaw.squeeze(1)
-
-    if yaw.shape != (self.len_traj_pred + 1,):
-        const_len = self.len_traj_pred + 1 - yaw.shape[0]
-        yaw = np.concatenate([yaw, np.repeat(yaw[-1], const_len)])
-        positions = np.concatenate([positions, np.repeat(positions[-1][None], const_len, axis=0)], axis=0)
-
-    assert yaw.shape == (self.len_traj_pred + 1,), f"{yaw.shape} and {(self.len_traj_pred + 1,)} should be equal"
-    assert positions.shape == (self.len_traj_pred + 1, 2), f"{positions.shape} and {(self.len_traj_pred + 1, 2)} should be equal"
-
-    waypoints = to_local_coords(positions, positions[0], yaw[0])
-    goal_pos = to_local_coords(goal_pos, positions[0], yaw[0])
-
-    assert waypoints.shape == (self.len_traj_pred + 1, 2), f"{waypoints.shape} and {(self.len_traj_pred + 1, 2)} should be equal"
-
-    if self.learn_angle:
-        yaw = yaw[1:] - yaw[0]
-        actions = np.concatenate([waypoints[1:], yaw[:, None]], axis=-1)
-    else:
-        actions = waypoints[1:]
-    
-    if self.normalize:
-        actions[:, :2] /= self.data_config["metric_waypoint_spacing"] * self.waypoint_spacing
-        goal_pos /= self.data_config["metric_waypoint_spacing"] * self.waypoint_spacing
-
-    assert actions.shape == (self.len_traj_pred, self.num_action_params), f"{actions.shape} and {(self.len_traj_pred, self.num_action_params)} should be equal"
-
-    return actions, goal_pos
-
-def process_actions(path):
-    with open(os.path.join(path, "traj_data.pkl"), "rb") as f:
-        traj_data = pickle.load(f)
-    actions, goal_pos = _compute_actions(0, 1)
-    return act_list
-
-
-def process_lang(path):
-    fp = os.path.join(path, "lang.json")
-    text = ""  # empty string is a placeholder for missing text
-    if os.path.exists(fp):
-        with open(fp, "r") as f:
-            text = f.readline().strip()
-    return text
-
+def resize_encode_image(tensor: torch.Tensor, size: Tuple[int, int]) -> tf.Tensor:
+    """Reads, decodes, resizes, and then re-encodes an image."""
+    image = tf.convert_to_tensor(np.transpose((tensor.numpy()*255).astype(np.uint8), axes=(1,2,0)))
+    image = resize_image(image, size)
+    image = tf.cast(tf.clip_by_value(tf.round(image), 0, 255), tf.uint8)
+    return tf.io.encode_jpeg(image, quality=95)
 
 # create a tfrecord for a group of trajectories
-def create_tfrecord(items, output_path, tqdm_func, global_tqdm):
+def create_tfrecord(items, output_path, tqdm_func=None, global_tqdm=None):
     writer = tf.io.TFRecordWriter(output_path)
-    print(items)
     for idx, item in enumerate(iter(items)):
         try: 
             (obs_image,
@@ -156,23 +82,20 @@ def create_tfrecord(items, output_path, tqdm_func, global_tqdm):
             dist_label,
             goal_pos,
             dataset_index,
-            action_mask,) = item 
+            action_mask,
+            lang,) = item 
 
             out = dict()
 
-            out["obs_image"] = obs_image.numpy()
-            out["goal_image"] = goal_image.numpy()
-            out["actions"] = action_label.numpy()
-            out["goal_pos"] = goal_pos.numpy()
-            out["dataset_index"] = dataset_index.numpy()
-            out["action_mask"] = action_mask.numpy()
-            out["lang"] = ""
+            obs_image = torch.cat((obs_image, goal_image), dim=0) 
+
+            obs = [resize_encode_image(obs_image[idx:idx+3,:,:], IMAGE_SIZE) for idx in range(int(np.ceil(obs_image.shape[0]/3)))]
 
             example = tf.train.Example(
                 features=tf.train.Features(
                     feature={
-                        k: tensor_feature(v)
-                        for k, v in dl.transforms.flatten_dict(out).items()
+                        "obs": tensor_feature(obs),
+                        "lang": tensor_feature(lang),
                     }
                 )
             )
@@ -185,10 +108,10 @@ def create_tfrecord(items, output_path, tqdm_func, global_tqdm):
             logging.error(f"Error processing {idx}")
             sys.exit(1)
 
-        global_tqdm.update(1)
+        # global_tqdm.update(1)
 
     writer.close()
-    global_tqdm.write(f"Finished {output_path}")
+    # global_tqdm.write(f"Finished {output_path}")
 
 
 def get_traj_paths(path, train_proportion):
@@ -290,23 +213,28 @@ def main(_):
     ]
     print("Starting create tfrecord tasks")
     # create tasks (see tqdm_multiprocess documenation)
-    tasks = [
-        (create_tfrecord, (train_shards[i], train_output_paths[i]))
-        for i in range(len(train_shards))
-    ] + [
-        (create_tfrecord, (val_shards[i], val_output_paths[i]))
-        for i in range(len(val_shards))
-    ]
+    for (shard, tf_path) in tqdm.tqdm(zip(train_shards, train_output_paths), total=len(train_shards)):
+        create_tfrecord(shard, tf_path)
+    
+    for (shard, tf_path) in tqdm.tqdm(zip(val_shards, val_output_paths), total=len(val_shards)):
+        create_tfrecord(shard, tf_path)
+    # tasks = []
+    #     (create_tfrecord, (train_shards[i], train_output_paths[i]))
+    #     for i in range(len(train_shards))
+    # ] + [
+    #     (create_tfrecord, (val_shards[i], val_output_paths[i]))
+    #     for i in range(len(val_shards))
+    # ]
 
     # run tasks
-    pool = TqdmMultiProcessPool(FLAGS.num_workers)
-    with tqdm.tqdm(
-        total=len(train_dataset) + len(test_dataset),
-        dynamic_ncols=True,
-        position=0,
-        desc="Total progress",
-    ) as pbar:
-        pool.map(pbar, tasks, lambda _: None, lambda _: None)
+    # pool = TqdmMultiProcessPool(FLAGS.num_workers)
+    # with tqdm.tqdm(
+    #     total=len(train_dataset) + len(test_dataset),
+    #     dynamic_ncols=True,
+    #     position=0,
+    #     desc="Total progress",
+    # ) as pbar:
+    #     pool.map(pbar, tasks, lambda _: None, lambda _: None)
 
 
 if __name__ == "__main__":

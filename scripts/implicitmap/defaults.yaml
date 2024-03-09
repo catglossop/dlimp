@@ -26,7 +26,7 @@ normalize: True
 
 # context
 context_type: temporal
-context_size: 5
+context_size: 20
 
 # tradeoff between action and distance prediction loss
 alpha: 0.5

@@ -57,7 +57,7 @@ carla:
   metric_waypoint_spacing: 1.59
   image_path_func: get_image_path
 
-sacson:
+sacson_new:
   metric_waypoint_spacing: 0.255
 
 # add your own dataset params here:

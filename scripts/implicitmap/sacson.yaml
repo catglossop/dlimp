@@ -25,7 +25,7 @@ normalize: True
 
 # context
 context_type: temporal # [temporal, randomized]
-context_size: 5
+context_size: 20
 
 # tradeoff between action and distance prediction loss
 alpha: 0.5
@@ -33,14 +33,14 @@ alpha: 0.5
 # distance bounds for distance and action and distance predictions 
 distance:
   min_dist_cat: 0
-  max_dist_cat: 20
+  max_dist_cat: 19
 action:
   min_dist_cat: 2
   max_dist_cat: 10
 close_far_threshold: 10 # distance threshold used to seperate the close and the far  subgoals that are sampled per datapoint
 
 # action output params
-len_traj_pred: 5
+len_traj_pred: 20
 learn_angle: True
 
 # dataset specific parameters
@@ -49,11 +49,11 @@ goal_type: "image"
 
 
 datasets:
-  sacson:
-    data_folder: /home/cglossop/sacson/
-    train: /home/cglossop/data_splits/sacson/train/
-    test: /home/cglossop/data_splits/sacson/test/
-    end_slack: 3 # because many trajectories end in collisions
+  sacson_new:
+    data_folder: /home/cglossop/sacson_new/
+    train: /home/cglossop/data_splits/sacson_new/train/
+    test: /home/cglossop/data_splits/sacson_new/test/
+    end_slack: 0 # because many trajectories end in collisions
     goals_per_obs: 1
     negative_mining: True
 
