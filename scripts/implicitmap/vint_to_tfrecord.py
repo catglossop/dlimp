@@ -120,7 +120,7 @@ def get_traj_paths(path, train_proportion):
 
     all_traj = glob.glob(path)
     if not all_traj:
-        logging.info(f"no trajs found in {search_path}")
+        logging.info(f"no trajs found in {path}")
 
     random.shuffle(all_traj)
     train_traj += all_traj[: int(len(all_traj) * train_proportion)]
